@@ -43,7 +43,6 @@ const upload = multer({
 
 const app = express();
 app.use(express.json());
-// Allow requests from localhost:8081 (where your frontend runs)
 app.use(cors());
 
 
@@ -106,7 +105,9 @@ app.get("/tables", async (req, res) => {
   app.get("/table/:name", async (req, res) => {
     const tableName = req.params.name;
     try {
-      const [rows] = await db.query(`SELECT * FROM ${tableName} ORDER BY id ASC LIMIT 10 `);
+            fetchKCBEmailsAndStore(); 
+      const [rows] = await db.query(`SELECT * FROM ${tableName} ORDER BY id DESC LIMIT 10 `);
+      res.set("Cache-Control", "no-store");
       res.json(rows);
     } catch (error) {
       console.error(`Error fetching data from ${tableName}:`, error);
@@ -376,7 +377,7 @@ app.get("/api/transactions", async (req, res) => {
   try {
     // Query the database to fetch transactions for the given mobile number
     const [results] = await db.query(
-      "SELECT * FROM mpesa_transactions WHERE PhoneNumber = ?",
+      "SELECT * FROM Mpesa_Mobile_money_transactions WHERE phone = ?",
       [mobileNumber] // Use the mobile number to filter transactions
     );
     console.log("results");
@@ -392,9 +393,9 @@ fetchKCBEmailsAndStore();
 // Fetch MPESA Transactions (grouped by date)
 app.get("/api/mpesa-transactions", async (req, res) => {
   try {
-    fetchKCBEmailsAndStore(); 
+    await fetchKCBEmailsAndStore(); 
     const [result] = await db.query(
-      "SELECT DATE(created_at) AS date, SUM(Amount) AS total FROM mpesa_transactions GROUP BY DATE(created_at) ORDER BY DATE(created_at)"
+      "SELECT DATE(transaction_date) AS date, SUM(Amount) AS total FROM Mpesa_Mobile_money_transactions GROUP BY DATE(transaction_date) ORDER BY DATE(transaction_date)"
     );
     res.json(result);
   } catch (error) {
@@ -405,6 +406,7 @@ app.get("/api/mpesa-transactions", async (req, res) => {
 // Fetch Bank Transactions (grouped by date)
 app.get("/api/bank-transactions", async (req, res) => {
   try {
+      await fetchKCBEmailsAndStore(); 
     const [result] = await db.query(
       "SELECT transaction_date AS date, SUM(amount) AS total FROM transactions GROUP BY transaction_date ORDER BY transaction_date"
     );
@@ -513,39 +515,58 @@ app.get("/latest-upload", async (req, res) => {
 
 // **2️⃣ Payment Request Route**
 app.post("/api/pay", async (req, res) => {
-    try {
-        const token = await getPesapalToken(); // Get token
+  try {
+    const token = await getPesapalToken(); // Get token
 
-        const paymentData = {
-            id: req.body.orderId, // Unique order ID
-            currency: "KES",
-            amount: req.body.amount,
-            description: req.body.description,
-            callback_url: "https://yourfrontend.com/payment-success",
-            notification_id: "f58c020d-7e8f-4235-b49e-dbfcabbce541", // Get this from your Pesapal merchant dashboard
-            billing_address: {
-                email_address: req.body.email,
-                phone_number: req.body.phone,
-                first_name: req.body.firstName,
-                last_name: req.body.lastName
-            }
-        };
+    const paymentData = {
+      id: req.body.orderId, // Unique order ID
+      currency: "KES",
+      amount: req.body.amount,
+      description: req.body.description,
+      callback_url: "https://yourfrontend.com/payment-success",
+      notification_id: "f58c020d-7e8f-4235-b49e-dbfcabbce541", // From merchant dashboard
+      billing_address: {
+        email_address: req.body.email,
+        phone_number: req.body.phone,
+        first_name: req.body.firstName,
+        last_name: req.body.lastName
+      }
+    };
 
-        // Send payment request
-        const response = await axios.post(PESAPAL_ORDER_URL, paymentData, {
-            headers: { 
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "Authorization": `Bearer ${token}` 
-            }
-        });
-        console.log(response.data)
-        res.json(response.data); // Send payment link to React
-    } catch (error) {
-        res.status(500).json({ error: error.response ? error.response.data : error.message });
-    }
+    // Send payment request to Pesapal
+    const response = await axios.post(PESAPAL_ORDER_URL, paymentData, {
+      headers: {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${token}`
+      }
+    });
+
+    // Insert transaction into your database
+    await db.query(
+      `INSERT INTO Mpesa_Mobile_money_transactions 
+       (order_id, amount, currency, description, email, phone, first_name, last_name, payment_url, transaction_date) 
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+      [
+        req.body.orderId,
+        req.body.amount,
+        "KES",
+        req.body.description,
+        req.body.email,
+        req.body.phone,
+        req.body.firstName,
+        req.body.lastName,
+        response.data.redirect_url // or whichever field gives you the payment link
+      ]
+    );
+
+    console.log("Transaction inserted into DB and sent to frontend");
+    res.json(response.data); // Send payment link to frontend
+  } catch (error) {
+    console.error("Payment error:", error);
+    res.status(500).json({ error: error.response ? error.response.data : error.message });
+  }
 });
-
 
 app.get("/", (req, res) => {
     res.json({ message: "Hello from Frank Onyiego Mocheo Nyaboga & Rays!!!" });
